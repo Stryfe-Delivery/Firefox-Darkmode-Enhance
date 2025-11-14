@@ -1,17 +1,25 @@
 let darkModeEnabled = true;
+let SITE_BLACKLIST = [];
 
-// Initialize from storage
-chrome.storage.local.get('darkModeEnabled', (data) => {
-  // Fix shadowing and default value
+// Load blacklist from storage
+chrome.storage.local.get(['blacklistedSites', 'darkModeEnabled'], (data) => {
+  SITE_BLACKLIST = data.blacklistedSites || [];
   darkModeEnabled = data.darkModeEnabled ?? true;
-  
-  // Only notify active tabs in normal windows
-  chrome.tabs.query({active: true, windowType: 'normal'}, (tabs) => {
-    tabs.forEach(tab => {
-      notifyTab(tab.id);
-    });
-  });
+  notifyTabsOptimized();
 });
+
+// Check if a tab URL is blacklisted
+function isTabBlacklisted(tab) {
+  if (!tab.url) return false;
+  try {
+    const url = new URL(tab.url);
+    return SITE_BLACKLIST.some(blacklisted => 
+      url.hostname === blacklisted || url.hostname.endsWith('.' + blacklisted)
+    );
+  } catch (error) {
+    return false;
+  }
+}
 
 // Handle keyboard shortcut
 chrome.commands.onCommand.addListener((command) => {
@@ -28,10 +36,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function toggleDarkMode() {
   darkModeEnabled = !darkModeEnabled;
   chrome.storage.local.set({ darkModeEnabled });
-  
-  // Notify all normal windows
-  chrome.tabs.query({windowType: 'normal'}, (tabs) => {
-    tabs.forEach(tab => notifyTab(tab.id));
+  notifyTabsOptimized();
+}
+
+// Optimized tab notification with blacklist support
+function notifyTabsOptimized() {
+  // First notify active tabs for immediate response
+  chrome.tabs.query({active: true, windowType: 'normal'}, (activeTabs) => {
+    activeTabs.forEach(tab => {
+      if (!isTabBlacklisted(tab)) {
+        notifyTab(tab.id);
+      }
+    });
+    
+    // Then notify background tabs with delay
+    chrome.tabs.query({active: false, windowType: 'normal'}, (backgroundTabs) => {
+      setTimeout(() => {
+        backgroundTabs.forEach(tab => {
+          if (!isTabBlacklisted(tab)) {
+            notifyTab(tab.id);
+          }
+        });
+      }, 1000);
+    });
   });
 }
 
@@ -48,9 +75,9 @@ function notifyTab(tabId) {
   );
 }
 
-// Add this listener to background.js
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'complete') {
+// Notify tabs when they complete loading (skip blacklisted sites)
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && !isTabBlacklisted(tab)) {
     chrome.tabs.sendMessage(tabId, { darkModeEnabled }, () => {
       if (chrome.runtime.lastError) {
         // Retry if content script isn't ready
